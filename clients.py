@@ -1,7 +1,7 @@
 import boto3
 import random
 import string
-import valve
+from valve.rcon import RCON
 
 # https://boto3.amazonaws.com/v1/documentation/api/latest/guide/migrationec2.html#launching-new-instances
 
@@ -51,16 +51,16 @@ class EC2Interface:
         return EC2Instance(instance.get("PublicIpAddress", ""), instance.get("InstanceId", ""))
 
 class TF2Interface:
-    def __init__(self, ip, rcon):
-        self.ip = ip
+    def __init__(self, ip, port, rcon):
+        self.ip_port = (ip, port)
         self.rcon = rcon
-        self.client = valve.rcon.RCON(ip, rcon)
+        self.client = RCON(self.ip_port, rcon)
         self.client.connect()
         self.client.authenticate()
 
     def rcon_command(self, command):
         response = self.client.execute(command)
-        return response.text
+        return response
 
     def close(self):
         self.client.close()

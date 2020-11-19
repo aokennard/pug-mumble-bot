@@ -2,6 +2,7 @@ from clients import EC2Instance, TF2Interface
 
 DEFAULT_PASSWORD_LENGTH = 12
 DEFAULT_RCON_LENGTH = 20
+DEFAULT_PORT = 27015
 
 def generate_random_string(length):
     alphabet = string.ascii_letters + string.digits
@@ -16,4 +17,4 @@ class Pug:
         self.rcon = generate_random_string(DEFAULT_RCON_LENGTH)
         
         self.ec2_instance = ec2_instance
-        self.tf2_client = TF2Interface(self.connect_ip, self.rcon)
+        self.tf2_client = TF2Interface(self.connect_ip, DEFAULT_PORT, self.rcon)

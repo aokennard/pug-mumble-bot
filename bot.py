@@ -120,8 +120,8 @@ class MumbleBot:
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Create a mumble bot for a designated server")
-    parser.add_argument('host', type=str, help="A string of the server IP/hostname", default='negasora.com')
-    parser.add_argument('port', type=int, help="An int of the servers port", default=64735)
+    parser.add_argument('--host', type=str, help="A string of the server IP/hostname", default='negasora.com')
+    parser.add_argument('--port', type=int, help="An int of the servers port", default=64735)
     parser.add_argument('--name', type=str, help="Optional bot name", default='testbot')
     parser.add_argument('--pw', type=str, help="Optional password for server", default='')
     args = parser.parse_args()

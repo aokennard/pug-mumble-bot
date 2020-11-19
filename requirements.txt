@@ -1,2 +1,2 @@
 pymumble==1.4
-valve==0.0.0
+python-valve==0.2.1
