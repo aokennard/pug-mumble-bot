@@ -1,24 +1,29 @@
 import pymumble_py3 as pymumble
 from pymumble_py3.messages import TextMessage
+from pymumble_py3.constants import PYMUMBLE_MSG_TYPES_USERSTATS
 from pymumble_py3.callbacks import PYMUMBLE_CLBK_TEXTMESSAGERECEIVED as RCV
 
 from clients import EC2Interface
-
 import auth
 import pug
 
+import thread
 import argparse
 
-commands = pymumble.commands.Commands()
+ROOT_NAME = "Root"
+LOBBY_NAME = "Lobby"
+PUG_FORMAT_NAME = "Pug {}"
+BLU_CHANNEL_NAME = "BLU"
+RED_CHANNEL_NAME = "RED"
 
-BOT_COMMANDS = {"kick" : kick_user,
-                "ban"  : ban_user}
-
-def message_received(proto_message):
-    # https://github.com/azlux/pymumble/blob/pymumble_py3/pymumble_py3/mumble_pb2.py#L1060
-    commands.new_cmd(TextMessage(proto_message.actor, proto_message.channel_id, proto_message.message))
+def get_bot_commands(scope):
+    return {"kick" : scope.kick_user,
+            "ban"  : scope.ban_user,
+            "mesg" : scope.message_channel,
+            "ping" : scope.ping_users}
 
 class MumbleBot:
+
     # TODO - internal state of the server kept here.
     # Root
     #   Lobby
@@ -34,11 +39,17 @@ class MumbleBot:
     def __init__(self, server_ip, server_port, nickname, password):
         self.mumble_client = pymumble.Mumble(server_ip, nickname, password=password, port=server_port)
         self.pugs = []
+        self.user_set_tmp = []
         self.ec2_interface = EC2Interface(auth.get_aws_key_id(), auth.get_access_key())
         self.setup_callbacks()
     
+    def message_received(self, proto_message):
+        # https://github.com/azlux/pymumble/blob/pymumble_py3/pymumble_py3/mumble_pb2.py#L1060
+        self.user_set_tmp.append(proto_message.actor)
+        self.mumble_client.commands.new_cmd(TextMessage(proto_message.actor, proto_message.channel_id, proto_message.message))
+
     def setup_callbacks(self):
-        self.mumble_client.callbacks.set_callback(RCV, message_received)
+        self.mumble_client.callbacks.set_callback(RCV, self.message_received)
 
     def start(self):
         self.mumble_client.start()
@@ -46,25 +57,64 @@ class MumbleBot:
 
     def stop(self):
         self.mumble_client.stop()
+ 
+    def create_pug_channels(pug_number):
+        channels = self.mumble_client.channels
+
+        def get_or_create_channel(channel, parent, temporary=True):
+            return channels.find_by_name(channel) or channels.new_channel(parent, channel, temporary)
+
+        # bot exists in Root
+        root_channel = get_or_create_channel(ROOT_NAME, self.mumble_client.my_channel(), temporary=False)
+        lobby_channel = get_or_create_channel(LOBBY_NAME, root_channel, temporary=False)
+        
+        new_pug_channel = get_or_create_channel(PUG_FORMAT_NAME.format(pug_number), lobby_channel)
+
+        new_blu_channel = get_or_create_channel(BLU_CHANNEL_NAME, new_pug_channel)
+        new_red_channel = get_or_create_channel(RED_CHANNEL_NAME, new_pug_channel)
 
     def error_message(self, *args):
-        print(args)
+        print("Invalid command w/ args passed:")
+        print(*args)
 
     def process_message(self, message):
         message_split = message.split()
 
-        process_function = BOT_COMMANDS.get(message_split[0], error_message)
-        self.process_function(message_split[1:])
+        process_function = get_bot_commands(self).get(message_split[0], self.error_message)
+        process_function(*message_split)
+
+    def handle_tf2server_startup(pug_number):
+        current_pug = self.pugs[pug_number]
+        ec2_instance = current_pug.ec2_instance
+        ec2_instance.await_instance_startup()
+
+        # Start running commands for TF2 server / setup.
+        current_pug.start_tf2_client()
+        # blocks
+        current_pug.tf2_client.await_connect_to_server()
+
+        current_pug.pug_state = pug.PugState.TF2_SERVER_ACTIVE
+        # run TF2 RCON commands, etc
+
+        # Wait here for TF2 SM plugin to send a message to a socket saying its setup? TODO
+        
+        
 
     def start_pug_command(self, pug_number):
-        # Creates new mumble channels for a pug, under the main 'Pug channel' - red / blu
-        # TODO should users have permissions to move 
+        
         new_ec2_instance = self.ec2_interface.create_ec2_instance()
         if not new_ec2_instance:
             print("Unable to create ec2 instance, send help")
             return False
 
+        # TODO should users have permissions to move ?
+        self.create_pug_channels(pug_number)
+
         new_pug = pug.Pug(new_ec2_instance)
+        self.pugs.append(pug_number, new_pug)
+
+        # I don't think we particularly mind using normal threads here
+        thread.start_new_thread(handle_tf2server_startup, (pug_number,))
 
         # Spins up new EC2 instance, pre-imaged with TF2 server (CDK OR cli?)
         # Have multiple? callbacks at this point - return upon EC2 instance starting up w/ tf2 server
@@ -90,7 +140,7 @@ class MumbleBot:
 
     def end_pug_command(self, *args):
         # args = [pug_number]
-
+        pass
         # This is likely received as a command from the TF2 SM plugin.
         # Explicitly deletes the pugN channels, clears relevant pugN data for mumble.
         # Dumps people to lobby channel (after some time?)
@@ -108,16 +158,44 @@ class MumbleBot:
         # Ban from the mumble server
         pass
 
+    def message_channel(self, *args):
+        #print(self.mumble_client.channels.get_descendants(self.mumble_client.my_channel()))
+        channel = self.mumble_client.channels.find_by_name("chillin or waiting")
+        if channel:
+            print(channel)
+            channel.send_text_message("pootis")
+
+    def ping_users(self, *args):
+        user_stats = pymumble.mumble_pb2.UserStats()
+        user_stats.session = self.user_set_tmp[0]
+
+        self.mumble_client.send_message(PYMUMBLE_MSG_TYPES_USERSTATS, user_stats)
+
     def toggle_mute(self, *args):
         # Mute / unmute the people in lobby / not playing
         pass
 
     def execute_rcon_command(self, *args):
-        # args = [pug_number, command]
-        # Execute an RCON command from mumble
-        # TODO make life easier? - be able to just 'start_pug_map process', have it changelevel and execute config
-        pass
+        pug_number = args[0]
+        command = args[1]
+        for pug_id, pug_type in self.pugs:
+            if pug_number == pug_id:
+                pug_type.tf2_client.rcon_command(command)
+                break
+        else:
+            print("Didn't execute command")
     
+
+    def received_commands(self):
+        while True:
+            if self.mumble_client.commands.is_cmd():
+                new_cmd = self.mumble_client.commands.pop_cmd()
+                if new_cmd != None:
+                    message = new_cmd.parameters["message"]
+                    if message == "quit":
+                        break
+                    yield message
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Create a mumble bot for a designated server")
     parser.add_argument('--host', type=str, help="A string of the server IP/hostname", default='negasora.com')
@@ -128,12 +206,8 @@ if __name__ == '__main__':
 
     bot = MumbleBot(args.host, args.port, args.name, args.pw)
     bot.start()
-    while True:
-        if commands.is_cmd():
-            new_cmd = commands.pop_cmd()
-            if new_cmd != None:
-                message = new_cmd.parameters["message"]
-                if message == "quit":
-                    break
-                bot.process_message(message)
+    #bot.mumble_client.run()
+    for command in bot.received_commands():
+        bot.process_message(command)
+                
     bot.stop()
