@@ -1,5 +1,5 @@
 import pymumble_py3 as pymumble
-from pymumble_py3.messages import TextMessage
+from pymumble_py3.messages import TextMessage, MoveCmd
 from pymumble_py3.constants import PYMUMBLE_MSG_TYPES_USERSTATS
 from pymumble_py3.callbacks import PYMUMBLE_CLBK_TEXTMESSAGERECEIVED as RCV
 
@@ -7,7 +7,7 @@ from clients import EC2Interface
 import auth
 import pug
 
-import thread
+import threading
 import argparse
 
 ROOT_NAME = "Root"
@@ -23,19 +23,6 @@ def get_bot_commands(scope):
             "ping" : scope.ping_users}
 
 class MumbleBot:
-
-    # TODO - internal state of the server kept here.
-    # Root
-    #   Lobby
-    #       Queue
-    #       Not playing
-    #       Volunteer?
-    #   Pug <N>
-    #       Blue
-    #       Red
-    #   Chill rool / Admin
-    # Each of these should have a num people + actor ID's if possible
-    # TODO connections to EC2 as well as RCON for servers, + passwords
     def __init__(self, server_ip, server_port, nickname, password):
         self.mumble_client = pymumble.Mumble(server_ip, nickname, password=password, port=server_port)
         self.pugs = []
@@ -46,7 +33,9 @@ class MumbleBot:
     def message_received(self, proto_message):
         # https://github.com/azlux/pymumble/blob/pymumble_py3/pymumble_py3/mumble_pb2.py#L1060
         self.user_set_tmp.append(proto_message.actor)
-        self.mumble_client.commands.new_cmd(TextMessage(proto_message.actor, proto_message.channel_id, proto_message.message))
+        self.process_message(proto_message.message)
+        self.mumble_client.users[proto_message.session[0]].send_text_message("yo")
+        #self.mumble_client.commands.new_cmd(TextMessage(proto_message.actor, proto_message.channel_id, proto_message.message))
 
     def setup_callbacks(self):
         self.mumble_client.callbacks.set_callback(RCV, self.message_received)
@@ -91,17 +80,19 @@ class MumbleBot:
         # Start running commands for TF2 server / setup.
         current_pug.start_tf2_client()
         # blocks
-        current_pug.tf2_client.await_connect_to_server()
+        connected = current_pug.tf2_client.connect_to_server()
+        if not connected:
+            print("Unable to connect to TF2 server")
+            # restart EC2 instance / grab new instance? TODO
+            return
 
         current_pug.pug_state = pug.PugState.TF2_SERVER_ACTIVE
         # run TF2 RCON commands, etc
 
         # Wait here for TF2 SM plugin to send a message to a socket saying its setup? TODO
+        print ("Done setup")
         
-        
-
     def start_pug_command(self, pug_number):
-        
         new_ec2_instance = self.ec2_interface.create_ec2_instance()
         if not new_ec2_instance:
             print("Unable to create ec2 instance, send help")
@@ -114,7 +105,8 @@ class MumbleBot:
         self.pugs.append(pug_number, new_pug)
 
         # I don't think we particularly mind using normal threads here
-        thread.start_new_thread(handle_tf2server_startup, (pug_number,))
+        startup = threading.Thread(target=handle_tf2server_startup, args=(pug_number,))
+        startup.start()
 
         # Spins up new EC2 instance, pre-imaged with TF2 server (CDK OR cli?)
         # Have multiple? callbacks at this point - return upon EC2 instance starting up w/ tf2 server
@@ -160,10 +152,17 @@ class MumbleBot:
 
     def message_channel(self, *args):
         #print(self.mumble_client.channels.get_descendants(self.mumble_client.my_channel()))
-        channel = self.mumble_client.channels.find_by_name("chillin or waiting")
+        channel = self.mumble_client.channels.find_by_name("--------------- AMONG US ---------------")
+        #movecmd = MoveCmd(self.mumble_client.users.myself_session, channel.get_id())
+        #movecmd.lock.acquire()
+        channel.move_in()
+        #self.mumble_client.treat_command(movecmd)
         if channel:
             print(channel)
-            channel.send_text_message("pootis")
+            #channel.send_text_message("pootis")
+            #textmsg = TextMessage(self.mumble_client.users.myself_session, channel.get_id(), "pootis")
+            #textmsg.lock.acquire()
+            #self.mumble_client.treat_command(textmsg)
 
     def ping_users(self, *args):
         user_stats = pymumble.mumble_pb2.UserStats()
@@ -178,8 +177,8 @@ class MumbleBot:
     def execute_rcon_command(self, *args):
         pug_number = args[0]
         command = args[1]
-        for pug_id, pug_type in self.pugs:
-            if pug_number == pug_id:
+        for pug in self.pugs:
+            if pug.pug_number == pug_id:
                 pug_type.tf2_client.rcon_command(command)
                 break
         else:
@@ -205,7 +204,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     bot = MumbleBot(args.host, args.port, args.name, args.pw)
-    bot.start()
+    #bot.start()
+    loop = threading.Thread(target=bot.mumble_client.run())
+    loop.start()
     #bot.mumble_client.run()
     for command in bot.received_commands():
         bot.process_message(command)
