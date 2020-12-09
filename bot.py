@@ -5,8 +5,9 @@ from pymumble_py3.callbacks import PYMUMBLE_CLBK_TEXTMESSAGERECEIVED as RCV
 
 from clients import EC2Interface
 import auth
-import pug
+import pug as tf2pug
 
+import time
 import threading
 import argparse
 
@@ -20,7 +21,19 @@ def get_bot_commands(scope):
     return {"kick" : scope.kick_user,
             "ban"  : scope.ban_user,
             "mesg" : scope.message_channel,
-            "ping" : scope.ping_users}
+            "ping" : scope.ping_users,
+            "roll" : scope.roll_medics}
+
+class BotState:
+    INVALID = -1
+    IDLE = 0
+    STARTING = 1
+    MEDIC_PICKING = 2
+    MEDICS_PICKED = 3
+    SENDING_INFO = 4 
+    SENT_INFO = 6 
+    ENDING_PUG = 7 
+
 
 class MumbleBot:
     def __init__(self, server_ip, server_port, nickname, password):
@@ -28,16 +41,27 @@ class MumbleBot:
         self.pugs = []
         self.user_set_tmp = []
         self.ec2_interface = EC2Interface(auth.get_aws_key_id(), auth.get_access_key())
-        self.setup_callbacks()
-    
+        self.pug_bot_state = BotState.IDLE
+        self.immunity_set = set()
+        self.volunteers = set()
+        self.active_picking_pug = -1
+        self.auto_roll = True
+        self.volunteer_id = -1
+
+        self.setup_mumble_callbacks()
+        
+    # movecmd?
     def message_received(self, proto_message):
+        if self.pug_bot_state == BotState.MEDIC_PICKING and self.users[proto_message.actor]["channel_id"] == self.volunteer_id:
+            self.volunteers.add(user["session"])
+    
         # https://github.com/azlux/pymumble/blob/pymumble_py3/pymumble_py3/mumble_pb2.py#L1060
         self.user_set_tmp.append(proto_message.actor)
         self.process_message(proto_message.message)
         self.mumble_client.users[proto_message.session[0]].send_text_message("yo")
         #self.mumble_client.commands.new_cmd(TextMessage(proto_message.actor, proto_message.channel_id, proto_message.message))
 
-    def setup_callbacks(self):
+    def setup_mumble_callbacks(self):
         self.mumble_client.callbacks.set_callback(RCV, self.message_received)
 
     def start(self):
@@ -46,6 +70,12 @@ class MumbleBot:
 
     def stop(self):
         self.mumble_client.stop()
+
+    def get_pug(self, pug_number):
+        for pug_id, pug in self.pugs:
+            if pug_id == pug_number:
+                return pug
+        return None
  
     def create_pug_channels(pug_number):
         channels = self.mumble_client.channels
@@ -56,6 +86,8 @@ class MumbleBot:
         # bot exists in Root
         root_channel = get_or_create_channel(ROOT_NAME, self.mumble_client.my_channel(), temporary=False)
         lobby_channel = get_or_create_channel(LOBBY_NAME, root_channel, temporary=False)
+        volunteer_channel = get_or_create_channel(VOLUNTEER_NAME, lobby_channel, temporary=False)
+        self.volunteer_id = volunteer_channel["channel_id"]
         
         new_pug_channel = get_or_create_channel(PUG_FORMAT_NAME.format(pug_number), lobby_channel)
 
@@ -66,11 +98,17 @@ class MumbleBot:
         print("Invalid command w/ args passed:")
         print(*args)
 
+    def roll_medics(self, *args):
+        n_medics = args[0]
+        # choose n out of players - immunity_set
+        return BotState.MEDICS_PICKED
+
+
     def process_message(self, message):
         message_split = message.split()
 
         process_function = get_bot_commands(self).get(message_split[0], self.error_message)
-        process_function(*message_split)
+        self.pug_bot_state = process_function(*message_split)
 
     def handle_tf2server_startup(pug_number):
         current_pug = self.pugs[pug_number]
@@ -86,59 +124,97 @@ class MumbleBot:
             # restart EC2 instance / grab new instance? TODO
             return
 
-        current_pug.pug_state = pug.PugState.TF2_SERVER_ACTIVE
+        current_pug.pug_state = tf2pug.PugState.TF2_SERVER_ACTIVE
         # run TF2 RCON commands, etc
 
         # Wait here for TF2 SM plugin to send a message to a socket saying its setup? TODO
         print ("Done setup")
         
-    def start_pug_command(self, pug_number):
+    def start_pug_command(self, *args):
+        self.pug_bot_state = BotState.STARTING
+
+        pug_number = args[0]
+        self.active_picking_pug = pug_number
+        # Spins up new EC2 instance, pre-imaged with TF2 server (CDK OR cli?)
         new_ec2_instance = self.ec2_interface.create_ec2_instance()
         if not new_ec2_instance:
             print("Unable to create ec2 instance, send help")
-            return False
+            return BotState.IDLE
 
         # TODO should users have permissions to move ?
         self.create_pug_channels(pug_number)
 
-        new_pug = pug.Pug(new_ec2_instance)
+        new_pug = tf2pug.Pug(new_ec2_instance)
         self.pugs.append(pug_number, new_pug)
 
         # I don't think we particularly mind using normal threads here
-        startup = threading.Thread(target=handle_tf2server_startup, args=(pug_number,))
-        startup.start()
-
-        # Spins up new EC2 instance, pre-imaged with TF2 server (CDK OR cli?)
-        # Have multiple? callbacks at this point - return upon EC2 instance starting up w/ tf2 server
-        # Generated RCON + PW for the instance, sets them
+        startup_thread = threading.Thread(target=handle_tf2server_startup, args=(pug_number,))
+        startup_thread.start()
         
-
         # Picking logic
-        # have callbacks keep track of the number of people moved into channels
-        # TODO Have a volunteer phase (users join channels, use separate command, or are in a queue of volunteers in separate channel any1 can join?)
-        # Provite immunity to volunteers
+        self.pug_bot_state = BotState.MEDIC_PICKING
+
+        # have callbacks keep track of the number of people moved into a volunteer channel
+        # give them immunity
+
+        if self.auto_roll:
+            time.sleep(10)
+            self.process_message(" ".join(["roll", str(len(self.volunteers))]))
+
+
+        while self.pug_bot_state != BotState.MEDICS_PICKED:
+            time.sleep(5)
+        
+        
         # After some amount of time / volunteer command called (whether by command or queue?), roll remainder medics. Calculated as 2 - sum(people in RED/BLU channels) people to roll.
         # note: if above is negative, goto the return of the picking logic?
         # TODO Need to check an immunity list for medics, have separate command for emptying the list, or doing it after N pugs? Deliberate
         # TODO account for subs / edge cases?
 
-        
+        self.pug_bot_state = BotState.SENDING_INFO
         # Sending info: either
         # Once an appropriate number are in a pugs channel, and the pug hasn't entered a 'started' state: wait a few seconds (edge cases?) and send to each user OR
         # As soon as tf2 server is started returns w/ callback, set pugN channels info to connect.
         # TODO decide if we want to send data to the bot to say if the pug started, or just set after sending connect.
-        pass
+        self.pug_bot_state = BotState.SENT_INFO
 
+        # Anything else here?
 
+        return BotState.IDLE
+        
+
+    # This is likely received as a command from the TF2 SM plugin.
     def end_pug_command(self, *args):
-        # args = [pug_number]
-        pass
-        # This is likely received as a command from the TF2 SM plugin.
-        # Explicitly deletes the pugN channels, clears relevant pugN data for mumble.
+        self.pug_bot_state = BotState.ENDING_PUG
+        pug_number = args[0]
+
+        # tells EC2 instance to spin down (or wait a few minutes, monitor num people in mumble / lobby to see if pugs still going)
+        pug = self.get_pug(pug_number)
+        if not pug:
+            print("Pug not found, cannot end")
+            return BotState.IDLE
+
+        # using mumble monitoring, may not spin down - 
+        self.ec2_interface.spin_down_instance(pug.ec2_instance, use_mumble_monitoring=True, mumble_client=self.mumble_client)
+        
+        pug_channel_root = self.mumble_client.channels.find_by_name(PUG_FORMAT_NAME.format(pug_number))
+        lobby_root = self.mumble_client.channels.find_by_name(ROOT_NAME)
+        if not pug_channel_root:
+            print("Pug channel not found, cannot move out / remove")
+            return BotState.IDLE
+
         # Dumps people to lobby channel (after some time?)
-        # tells EC2 instance to spin down, probably. 
-        # Maybe do some logic that makes the server wait a few minutes before shutting down, to save time in case another pug starts
-        # Possible: wait a 1-5 minutes to keep track of num people in lobby after a pug ends, to see if people will leave. If it looks like its ending, spin down.
+        time.sleep(20)
+
+        users = pug_channel_root.get_users():
+        for user in users:
+            lobby_root.move_in(user["session"])
+        
+        # Explicitly deletes the pugN channels, clears relevant pugN data for mumble.
+        pug_channel_root.remove()
+
+        return BotState.IDLE
+        
 
     def kick_user(self, *args):
         # args = [user, reason=opt]
@@ -177,10 +253,9 @@ class MumbleBot:
     def execute_rcon_command(self, *args):
         pug_number = args[0]
         command = args[1]
-        for pug in self.pugs:
-            if pug.pug_number == pug_id:
-                pug_type.tf2_client.rcon_command(command)
-                break
+        pug = self.get_pug(pug_number)
+        if pug:
+            pug.tf2_client.rcon_command(command)
         else:
             print("Didn't execute command")
     

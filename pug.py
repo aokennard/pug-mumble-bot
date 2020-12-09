@@ -1,5 +1,4 @@
-from clients import EC2Instance, TF2Interface
-from enum import Enum
+from clients import EC2Instance, TF2Interfac
 
 DEFAULT_PASSWORD_LENGTH = 12
 DEFAULT_RCON_LENGTH = 20
