@@ -9,6 +9,7 @@ import pug as tf2pug
 
 import time
 import threading
+import random
 import argparse
 
 ROOT_NAME = "Root"
@@ -16,6 +17,10 @@ LOBBY_NAME = "Lobby"
 PUG_FORMAT_NAME = "Pug {}"
 BLU_CHANNEL_NAME = "BLU"
 RED_CHANNEL_NAME = "RED"
+
+PUG_ROOT_INDEX = 0
+BLU_CHANNEL_INDEX = 1
+RED_CHANNEL_INDEX = 2
 
 def get_bot_commands(scope):
     return {"kick" : scope.kick_user,
@@ -39,6 +44,7 @@ class MumbleBot:
     def __init__(self, server_ip, server_port, nickname, password):
         self.mumble_client = pymumble.Mumble(server_ip, nickname, password=password, port=server_port)
         self.pugs = []
+        self.pug_channels = dict()
         self.user_set_tmp = []
         self.ec2_interface = EC2Interface(auth.get_aws_key_id(), auth.get_access_key())
         self.pug_bot_state = BotState.IDLE
@@ -46,14 +52,19 @@ class MumbleBot:
         self.volunteers = set()
         self.active_picking_pug = -1
         self.auto_roll = True
-        self.volunteer_id = -1
+
+        self.volunteer_channel = None
+        self.lobby_channel = None
+        self.root_channel = None
 
         self.setup_mumble_callbacks()
         
     # movecmd?
     def message_received(self, proto_message):
-        if self.pug_bot_state == BotState.MEDIC_PICKING and self.users[proto_message.actor]["channel_id"] == self.volunteer_id:
+        if self.users[proto_message.actor]["channel_id"] == self.volunteer_id:
             self.volunteers.add(user["session"])
+        elif user["session"] in self.volunteers:
+            self.volunteers.remove(user["session"])
     
         # https://github.com/azlux/pymumble/blob/pymumble_py3/pymumble_py3/mumble_pb2.py#L1060
         self.user_set_tmp.append(proto_message.actor)
@@ -84,23 +95,46 @@ class MumbleBot:
             return channels.find_by_name(channel) or channels.new_channel(parent, channel, temporary)
 
         # bot exists in Root
-        root_channel = get_or_create_channel(ROOT_NAME, self.mumble_client.my_channel(), temporary=False)
-        lobby_channel = get_or_create_channel(LOBBY_NAME, root_channel, temporary=False)
-        volunteer_channel = get_or_create_channel(VOLUNTEER_NAME, lobby_channel, temporary=False)
-        self.volunteer_id = volunteer_channel["channel_id"]
+        self.root_channel = get_or_create_channel(ROOT_NAME, self.mumble_client.my_channel(), temporary=False)
+        self.lobby_channel = get_or_create_channel(LOBBY_NAME, root_channel, temporary=False)
+        self.volunteer_channel = get_or_create_channel(VOLUNTEER_NAME, lobby_channel, temporary=False)
         
         new_pug_channel = get_or_create_channel(PUG_FORMAT_NAME.format(pug_number), lobby_channel)
 
         new_blu_channel = get_or_create_channel(BLU_CHANNEL_NAME, new_pug_channel)
         new_red_channel = get_or_create_channel(RED_CHANNEL_NAME, new_pug_channel)
 
+        self.pug_channels[PUG_FORMAT_NAME.format(pug_number)] = [new_pug_channel, new_blu_channel, new_red_channel]
+
     def error_message(self, *args):
         print("Invalid command w/ args passed:")
         print(*args)
 
     def roll_medics(self, *args):
-        n_medics = args[0]
-        # choose n out of players - immunity_set
+        medics = []
+        volunteers = set(self.volunteer_channel.get_users())
+        if len(volunteers) > 0:
+            medics.extend(random.sample(volunteers, max(2, len(volunteers)))    
+
+        lobby_players = set(self.lobby_players.get_users()) - self.immunity_set
+        
+        if len(lobby_players) <= 0:
+            print("Fatal: no lobby players, cannot roll")
+            return BotState.INVALID
+
+        medics_to_pick = 2 - len(medics)
+        if medics_to_pick > 0:
+            medics.extend(random.sample(lobby_players, medics_to_pick))
+
+        pug_channels = self.pug_channels[PUG_FORMAT_NAME.format(self.active_picking_pug)]
+        red_channel_id, blu_channel_id = pug_channels[RED_CHANNEL_INDEX]["channel_id"], pug_channels[BLU_CHANNEL_INDEX]["channel_id"]
+
+        medics[0].move_in(red_channel_id)
+        medics[1].move_in(blu_channel_id)
+
+        # TODO have separate command for emptying the set, or doing it after N pugs? Deliberate
+        # TODO account for subs / edge cases?
+        self.immunity_set.update(medics)
         return BotState.MEDICS_PICKED
 
 
@@ -109,6 +143,7 @@ class MumbleBot:
 
         process_function = get_bot_commands(self).get(message_split[0], self.error_message)
         self.pug_bot_state = process_function(*message_split)
+        return self.pug_bot_state
 
     def handle_tf2server_startup(pug_number):
         current_pug = self.pugs[pug_number]
@@ -154,22 +189,17 @@ class MumbleBot:
         # Picking logic
         self.pug_bot_state = BotState.MEDIC_PICKING
 
-        # have callbacks keep track of the number of people moved into a volunteer channel
-        # give them immunity
-
+        # After some amount of time / volunteer command called (whether by command or queue?), roll remainder medics.
         if self.auto_roll:
             time.sleep(10)
-            self.process_message(" ".join(["roll", str(len(self.volunteers))]))
-
-
-        while self.pug_bot_state != BotState.MEDICS_PICKED:
-            time.sleep(5)
-        
-        
-        # After some amount of time / volunteer command called (whether by command or queue?), roll remainder medics. Calculated as 2 - sum(people in RED/BLU channels) people to roll.
-        # note: if above is negative, goto the return of the picking logic?
-        # TODO Need to check an immunity list for medics, have separate command for emptying the list, or doing it after N pugs? Deliberate
-        # TODO account for subs / edge cases?
+            state = self.process_message("roll")
+            if state == BotState.INVALID:
+                print("Invalid state, ending draft")
+                # shut down TODO
+                return
+        else:
+            while self.pug_bot_state != BotState.MEDICS_PICKED:
+                time.sleep(5) 
 
         self.pug_bot_state = BotState.SENDING_INFO
         # Sending info: either
@@ -179,7 +209,7 @@ class MumbleBot:
         self.pug_bot_state = BotState.SENT_INFO
 
         # Anything else here?
-
+        self.active_picking_pug = -1
         return BotState.IDLE
         
 
