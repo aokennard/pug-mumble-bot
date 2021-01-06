@@ -1,6 +1,7 @@
+from config import config
 
-DEFAULT_KEY_ID_FILENAME = "secrets/aws_key_id"
-DEFAULT_ACCESS_KEY_FILENAME = "secrets/aws_access_key"
+DEFAULT_KEY_ID_FILENAME = config["aws_key_id_filename"]
+DEFAULT_ACCESS_KEY_FILENAME = config["aws_access_key_filename"]
 
 def read_file_secrets(filename):
     with open(filename, "r") as f:

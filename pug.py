@@ -1,8 +1,9 @@
-from clients import EC2Instance, TF2Interfac
+from clients import EC2Instance, TF2Interface
+from config import config
 
-DEFAULT_PASSWORD_LENGTH = 12
-DEFAULT_RCON_LENGTH = 20
-DEFAULT_PORT = 27015
+DEFAULT_PASSWORD_LENGTH = config["password_length"]
+DEFAULT_RCON_LENGTH = config["rcon_length"]
+DEFAULT_PORT = config["tf2_port"]
 
 class PugState:
     INVALID = -1

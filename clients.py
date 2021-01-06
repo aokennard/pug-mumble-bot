@@ -6,12 +6,14 @@ import socket
 import time
 from valve.rcon import RCON
 
+from config import config
+
 # https://boto3.amazonaws.com/v1/documentation/api/latest/guide/migrationec2.html#launching-new-instances
 
 # TODO if we fail to get a client / instance, retry in this order. If we don't get any of them, abort.
-REGION_PRIORITIES = ['us-east-2', 'us-east-1', 'us-west-2', 'us-west-1']
+REGION_PRIORITIES = config["region_priorities"]
 # TODO not in any real order
-INSTANCE_PRIORITIES = ["c5.large", "t3.small", "t3a.small", "c5a.large"]
+INSTANCE_PRIORITIES = config["instance_priorities"]
 
 RETRY_DELAY = 10
 RETRIES = 10
@@ -75,6 +77,8 @@ class EC2Interface:
     def create_ec2_instance(self):
         if len(self.ec2_instance_pool) != 0:
             return self.ec2_instance_pool.pop()
+
+        # alternatively, get existing instance and just turn it on.
         
         conn = self.ec2_client.run_instances(InstanceType="t2.micro", 
                             MaxCount=1, 
@@ -102,7 +106,7 @@ class EC2Interface:
 
         turn_off_instance = True
 
-        # Work - naive for now, make better later
+        # Work - naive for now, make better later TODO
         time.sleep(60)
 
         turn_off_instance = mumble_client.users.count() < 12
@@ -115,6 +119,7 @@ class EC2Interface:
         if use_mumble_monitoring:
             if mumble_client:
                 self.monitor_mumble_spin_down(ec2_instance, mumble_client)
+                return
             print("Now performing spin down default spin down")
 
         instance_id = ec2_instance.ec2_credentials["instance-id"]
