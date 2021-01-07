@@ -22,6 +22,7 @@ instance_priorities:
 - c5a.large
 aws_key_id_filename: secrets/aws_key_id
 aws_access_key_filename: secrets/aws_access_key
+use_mumble_monitoring: true
 medic_immunity_reset_hours: 6
 autoroll_delay: 10
 end_pug_delay: 20
