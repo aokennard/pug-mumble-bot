@@ -15,8 +15,8 @@ REGION_PRIORITIES = config["region_priorities"]
 # TODO not in any real order
 INSTANCE_PRIORITIES = config["instance_priorities"]
 
-RETRY_DELAY = 10
-RETRIES = 10
+RETRY_DELAY = config["ec2_retry_delay"]
+RETRIES = config["ec2_num_retries"]
 
 class EC2Instance:
     def __init__(self, instance):
@@ -49,7 +49,7 @@ class EC2Instance:
             print("Error creating socket")
             return
         while retry_count < retry_delay:
-            result = sock.connect_ex((self._instance.public_ip_address, 22))
+            result = sock.connect_ex((self.ec2_credentials["ec2-ip"], 22))
             if result == 0:
                 break
             time.sleep(retry_delay)
@@ -80,6 +80,7 @@ class EC2Interface:
 
         # alternatively, get existing instance and just turn it on.
         
+        # TODO change instance type!
         conn = self.ec2_client.run_instances(InstanceType="t2.micro", 
                             MaxCount=1, 
                             MinCount=1, 
@@ -109,7 +110,7 @@ class EC2Interface:
         # Work - naive for now, make better later TODO
         time.sleep(60)
 
-        turn_off_instance = mumble_client.users.count() < 12
+        turn_off_instance = mumble_client.users.count() < config["min_total_players"]
 
         if turn_off_instance and ec2_instance in self.ec2_instance_pool:
             self.ec2_instance_pool.remove(ec2_instance)

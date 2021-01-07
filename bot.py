@@ -14,19 +14,23 @@ import threading
 import random
 import argparse
 
-HELP_STRING = """Bot commands :
-    <> indicates required argument, [] is optional
-    mute - Mutes all users in lobby, volunteer, and chill channel
-    unmute - Unmutes all users in lobby, volunteer, and chill channel
-    help - Displays this help message
-    start - Starts pug: creates channels, acquires server, sets up TF2 server, medic rolling logic, info sending
-    end <pug number> [override: 0 or 1] - Ends pug: removes channels (with a delay, unless the override is 1), tells server to shut down (possibly), moves users to lobby
-    roll - Uses the active pug kept by the bot + volunteers in the channel to roll medics and move them into proper create_base_channels
-    reset - Manually resets the medic immunity pool
-    dump <pug number> - Dumps the users in a pug channel to lobby, also cleans up remainder of that pugs info
-    quit - Turns off the bot
-    kick [reason] - Kicks a user
-    ban [reason] - Bans a user
+HELP_STRING = """Bot commands:<br>
+    <span style="color:red">Red text</span> indicates required argument, <span style="color:blue">blue text</span> is optional
+    <ul>
+    <li>mute - Mutes all users in lobby, volunteer, and chill channel</li>
+    <li>unmute - Unmutes all users in lobby, volunteer, and chill channel</li>
+    <li>help - Displays this help message</li>
+    <li>start - Starts pug: creates channels, acquires server, sets up TF2 server, medic rolling logic, info sending</li>
+    <li>end <span style="color:red">pug-number</span> <span style="color:blue">[override: 0 or 1]</span>
+     - Ends pug: removes channels (with a delay, unless the override is 1), tells server to shut down (possibly), moves users to lobby</li>
+    <li>roll - Uses the active pug kept by the bot + volunteers in the channel to roll medics and move them into proper create_base_channels</li>
+    <li>reset - Manually resets the medic immunity pool</li>
+    <li>dump <span style="color:red">pug-number</span> - Dumps the users in a pug channel to lobby, also cleans up remainder of that pugs info</li>   
+    <li>rcon <span style="color:red">pug-number command</span> - uses 'rcon <span style="color:red">command</span>' for <span style="color:red">pug-number</span>'s tf2 server</li>    
+    <li>quit - Turns off the bot</li>    
+    <li>kick <span style="color:blue">[reason]</span> - Kicks a user</li>    
+    <li>ban <span style="color:blue">[reason]</span> - Bans a user</li>
+    </ul>
 """
 
 ROOT_NAME = config["root_name"]
@@ -52,9 +56,27 @@ class BotState:
     SENT_INFO = 6 
     ENDING_PUG = 7 
 
+class CommandRegister(object):
+    def __init__(self):
+        self._commands = {}
+    
+    def __getitem__(self, item):
+        return self._commands[item]
+    
+    def get(self, item, default=None):
+        return self._commands.get(item, default)
+
+    def new(self, command):
+        def wrapper(f):
+            self._commands[command] = f
+            return f
+        return wrapper
+
+cmd = CommandRegister()
+
 class MumbleBot:
     def __init__(self, server_ip, server_port, nickname, password):
-        self.mumble_client = pymumble.Mumble(server_ip, nickname, password=password, port=server_port, debug=True)
+        self.mumble_client = pymumble.Mumble(server_ip, nickname, password=password, port=server_port, debug=False)
         self.pugs = [None] * (config["max_pugs"] + 1)
         self.pug_channels = dict()
         self.user_set_tmp = []
@@ -70,17 +92,15 @@ class MumbleBot:
         self.lobby_channel = None
         self.root_channel = None
         self.chill_channel = None
-
         
         self.mumble_client.start()
         self.mumble_client.is_ready()
 
-        loop = threading.Thread(target=self.mumble_client.run)
+        #loop = threading.Thread(target=self.mumble_client.run)
         #loop.start()
 
         self.setup_mumble_callbacks()
         self.create_base_channels()
-        
 
     def send_user_message(self, receiver, message):
         self.mumble_client.users[receiver].send_text_message(message)
@@ -91,7 +111,8 @@ class MumbleBot:
         self.send_user_message(args[-1], message)
 
     def get_bot_command(self, command):
-        return {"kick" : self.kick_user,
+        return cmd.get(command, self.error_message)
+        '''return {"kick" : self.kick_user,
             "ban"  : self.ban_user,
             "quit" : self.stop,
             "mesg" : self.message_channel,
@@ -103,7 +124,8 @@ class MumbleBot:
             "reset" : self.reset_medic_immunity,
             "help" : self.help_message,
             "dump" : self.dump_channel_and_cleanup,
-            "end" : self.end_pug_command}.get(command, self.error_message)
+            "rcon" : self.execute_rcon_command,
+            "end" : self.end_pug_command}.get(command, self.error_message)'''
         
     def volunteer_check(self, sender):
         # actor instead?
@@ -125,11 +147,20 @@ class MumbleBot:
         
         #self.mumble_client.commands.new_cmd(TextMessage(proto_message.actor, proto_message.channel_id, proto_message.message))
     
+    def process_message(self, message, sender):
+        message_split = message.split()
+
+        process_function = self.get_bot_command(message_split[0])
+        self.pug_bot_state = process_function(self, *message_split[1:], sender)
+
+    # TODO bot still crashes after creating 1 channel at a time.
     def get_or_create_channel(self, channel, parent, temporary=True):
         channels = self.mumble_client.channels
         try:
-            return channels.find_by_name(channel)
+            new_channel = channels.find_by_name(channel)
+            return new_channel
         except pymumble.errors.UnknownChannelError:
+            print(parent, channel)
             channels.new_channel(parent, channel, temporary)
             return channels.find_by_name(channel)
 
@@ -147,11 +178,12 @@ class MumbleBot:
         self.mumble_client.callbacks.set_callback(RCV, self.message_received)
         self.mumble_client.callbacks.set_callback(CC, self.create_channel)
 
+    @cmd.new("help")
     def help_message(self, *args):
         sender = args[-1]
         self.mumble_client.users[sender].send_text_message(HELP_STRING)
         
-    def stop(self):
+    def stop(self, *args):
         self.mumble_client.stop()
         self.active = False
 
@@ -167,9 +199,9 @@ class MumbleBot:
         return None
 
     def get_pug(self, pug_number):
-        return self.pugs[pug_number]
+        return self.pugs[pug_number] if pug_number != -1 else None
 
-    def remove_pug(self, pug_number):
+    def remove_pug_data(self, pug_number):
         pug_channel_root = self.pug_channels.get(pug_number)
 
         self.pugs[pug_number] = None
@@ -184,9 +216,11 @@ class MumbleBot:
 
         self.pug_channels[PUG_FORMAT_NAME.format(pug_number)] = [new_pug_channel, new_blu_channel, new_red_channel]
 
+    @cmd.new("reset")
     def reset_medic_immunity(self, *args):
         self.immunity_set = set()
     
+    @cmd.new("roll")
     def roll_medics(self, *args):
         medics = []
         volunteers = set(self.volunteer_channel.get_users())
@@ -218,19 +252,12 @@ class MumbleBot:
         self.immunity_set.update(medics)
         return BotState.MEDICS_PICKED
 
-    def process_message(self, message, sender):
-        message_split = message.split()
-
-        process_function = self.get_bot_command(message_split[0])
-        self.pug_bot_state = process_function(*message_split[1:], sender)
-        return self.pug_bot_state
-
     def medic_immunity_check(self):
         def immunity_callback():
             time.sleep(60 * 60 * config["medic_immunity_reset_hours"])
             # somewhat lazy, but this should account for when pugs die.
             # optimistically assumes after "medic_immunity_reset_hours" hours that we can say pugs are reset
-            if len(self.get_lobby_users()) < 12:
+            if len(self.get_lobby_users()) < config["min_total_players"]:
                 self.reset_medic_immunity()
 
         threading.Thread(target=immunity_callback).start()          
@@ -255,9 +282,16 @@ class MumbleBot:
         # Wait here for TF2 SM plugin to send a message to a socket saying its setup? TODO
         self.send_user_message(sender, "Done with TF2 server setup for pug {}".format(str(pug_number)))
         
+    def can_start_pug(self):
+        return len(self.get_lobby_users(use_chill_room=False)) >= config["min_total_players"]
+
+    @cmd.new("start")
     def start_pug_command(self, *args):
         self.pug_bot_state = BotState.STARTING
         sender = args[-1]
+
+        if not self.can_start_pug():
+            return BotState.IDLE
 
         pug_number = self.get_new_pug_number()
         if pug_number is None:
@@ -312,10 +346,14 @@ class MumbleBot:
         return BotState.IDLE      
 
     # This is likely received as a command from the TF2 SM plugin.
+    @cmd.new("end")
     def end_pug_command(self, *args):
         self.pug_bot_state = BotState.ENDING_PUG
-        pug_number = args[0]
-        override = args[1]
+        pug_number = args[0] if args[0].isnumeric() else -1
+        override = False
+        if len(args) > 2 and args[1].isnumeric():
+            override = int(args[1])
+            
         sender = args[-1]
 
         # tells EC2 instance to spin down (or wait a few minutes, monitor num people in mumble / lobby to see if pugs still going)
@@ -325,7 +363,7 @@ class MumbleBot:
             return BotState.IDLE
 
         # using mumble monitoring, may not spin down 
-        spindown_thread = threading.Thread(target=self.ec2_interface.spin_down_instance, args=(pug.ec2_instance,), kwargs={'use_mumble_monitoring'=True, 'mumble_client'=self.mumble_client})
+        spindown_thread = threading.Thread(target=self.ec2_interface.spin_down_instance, args=(pug.ec2_instance,), kwargs={'use_mumble_monitoring':True, 'mumble_client':self.mumble_client})
         spindown_thread.start()
 
         # Dumps people to lobby channel, but we may need to lock lobby when picking.
@@ -340,6 +378,7 @@ class MumbleBot:
 
         return BotState.IDLE
 
+    @cmd.new("dump")
     def dump_channel_and_cleanup(self, *args):
         pug_number = args[0]
         sender = args[-1]
@@ -354,7 +393,7 @@ class MumbleBot:
             self.lobby_channel.move_in(user["session"])
         
         # Explicitly deletes the pugN channels, clears relevant pugN data for mumble.
-        self.remove_pug(pug_number)
+        self.remove_pug_data(pug_number)
 
         # Starts a callback which may clear the medic immunity set
         self.medic_immunity_check()
@@ -362,7 +401,8 @@ class MumbleBot:
         self.send_user_message(sender, "Ended pug {}".format(str(pug_number)))
 
         return BotState.IDLE
-        
+
+    @cmd.new("kick") 
     def kick_user(self, *args):
         user = args[0]
         reason = "Kicked from server"
@@ -372,6 +412,7 @@ class MumbleBot:
 
         user.kick(reason)
 
+    @cmd.new("ban")
     def ban_user(self, *args):
         user = args[0]
         reason = "Banned from server"
@@ -381,6 +422,7 @@ class MumbleBot:
 
         user.ban(reason)
 
+    @cmd.new("mesg")
     def message_channel(self, *args):
         channel = self.mumble_client.channels.find_by_name(args[0])
         channel.move_in()
@@ -391,25 +433,32 @@ class MumbleBot:
             #textmsg.lock.acquire()
             #self.mumble_client.treat_command(textmsg)
 
+    @cmd.new("ping")
     def ping_users(self, *args):
         user_stats = pymumble.mumble_pb2.UserStats()
         user_stats.session = self.user_set_tmp[0]
 
         self.mumble_client.send_message(PYMUMBLE_MSG_TYPES_USERSTATS, user_stats)
 
-    def get_lobby_users(self):
-        return set(self.lobby_channel.get_users()) + set(self.volunteer_channel.get_users()) + set(self.chill_channel.get_users())
+    def get_lobby_users(self, use_chill_room=True):
+        lobby_users = set(self.lobby_channel.get_users()) | set(self.volunteer_channel.get_users())
+        if use_chill_room:
+            lobby_users |= set(self.chill_channel.get_users())
+        return lobby_users
 
+    @cmd.new("mute")
     def mute_lobby(self, *args):
         lobby_users = self.get_lobby_users()
         for user in lobby_users:
             user.mute()
 
+    @cmd.new("unmute")
     def unmute_lobby(self, *args):
         lobby_users = self.get_lobby_users()
         for user in lobby_users:
             user.unmute()
-        
+
+    @cmd.new("rcon")  
     def execute_rcon_command(self, *args):
         pug_number = args[0]
         command = args[1]
@@ -433,4 +482,4 @@ if __name__ == '__main__':
     while True:
         if not bot.active:
             break
-        time.sleep(10)
+        time.sleep(3)

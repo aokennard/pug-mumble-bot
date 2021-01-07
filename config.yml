@@ -9,6 +9,7 @@ max_pugs: 5
 password_length: 12
 rcon_length: 20
 tf2_port: 27015
+min_total_players: 12
 region_priorities:
 - us-east-2
 - us-east-1
@@ -24,3 +25,5 @@ aws_access_key_filename: secrets/aws_access_key
 medic_immunity_reset_hours: 6
 autoroll_delay: 10
 end_pug_delay: 20
+ec2_retry_delay: 10
+ec2_num_retries: 10
