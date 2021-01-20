@@ -1,6 +1,6 @@
 root_name: Root
 lobby_name: Lobby
-volunteer_name: Volunteer
+volunteer_name: Medic volunteers
 chill_name: Chill room
 pug_format_name: Pug {}
 BLU: BLU
@@ -9,7 +9,7 @@ max_pugs: 5
 password_length: 12
 rcon_length: 20
 tf2_port: 27015
-min_total_players: 12
+min_total_players: 6
 region_priorities:
 - us-east-2
 - us-east-1
@@ -22,6 +22,11 @@ instance_priorities:
 - c5a.large
 aws_key_id_filename: secrets/aws_key_id
 aws_access_key_filename: secrets/aws_access_key
+ec2_ami: ami-03ea1b5724483c472
+ec2_secgroupids:
+- sg-0508f87e0dba26c1a
+tf2_config_path: /home/ubuntu/tf2server/hlserver/tf/cfg/server.cfg
+bot_data_store_name: mumble_bot_store.dat
 use_mumble_monitoring: true
 medic_immunity_reset_hours: 6
 autoroll_delay: 10

@@ -1,10 +1,11 @@
 import boto3
 from botocore.exceptions import ClientError
+from valve.rcon import RCON
+
 import random
 import string
 import socket
 import time
-from valve.rcon import RCON
 
 from config import config
 
@@ -19,11 +20,17 @@ RETRY_DELAY = config["ec2_retry_delay"]
 RETRIES = config["ec2_num_retries"]
 
 class EC2Instance:
-    def __init__(self, instance):
+    def __init__(self, instance, ip):
         self._instance = instance
-        self.ec2_credentials = {"ec2-ip" : instance.get("PublicIpAddress"), "instance-id" : instance.get("InstanceId")}
+        self.ec2_credentials = {"ec2-ip" : ip, "instance-id" : instance.get("InstanceId")}
         self.ec2_misc = dict()
 
+    def create_tags(self, tags):
+        self._instance.create_tags(Resources=[self.ec2_credentials["instance-id"]], Tags=tags)
+
+    def get_ip(self):
+        return self.ec2_credentials["ec2-ip"]
+        
     def run_command(self, client, command):
         try:
             response = client.send_command(
@@ -35,11 +42,13 @@ class EC2Instance:
             return
 
         command_id = response['Command']['CommandId']
+        time.sleep(5)
         try:
-            output = ssm_client.get_command_invocation(CommandId=command_id, InstanceId=self.ec2_credentials["instance-id"])
+            output = client.get_command_invocation(CommandId=command_id, InstanceId=self.ec2_credentials["instance-id"])
+            print(output)
         except ClientError as e:
             print(e)
-        print(output)
+        
 
     # because wait_until_running seems not good right now?
     def await_instance_startup(self, retry_delay=RETRY_DELAY, retries=RETRIES):
@@ -56,9 +65,9 @@ class EC2Instance:
             retry_count += 1
         sock.close()
 
-    # TODO turn off tf2 + misc
+    # TODO turn off tf2 + misc 
     def turn_off_server(self):
-        pass
+        self.run_command("killall srcds_linux")
 
 
 class EC2Interface:
@@ -66,39 +75,50 @@ class EC2Interface:
         self.ec2_client = self.setup_client('ec2', key_id, access_key)
         self.ssm_client = self.setup_client('ssm', key_id, access_key)
         self.instance_to_ip_id = dict()
-        self.ec2_instance_pool = set()
+        self.ec2_instance_pool = []
 
+    # no support for region priorities atm
     def setup_client(self, client_type, key_id, access_key):
         return boto3.client(client_type, 
             region_name=REGION_PRIORITIES[0], 
             aws_access_key_id=key_id, 
             aws_secret_access_key=access_key)
 
-    def create_ec2_instance(self):
+    def create_ec2_instance(self, init_script=None):
         if len(self.ec2_instance_pool) != 0:
             return self.ec2_instance_pool.pop()
 
         # alternatively, get existing instance and just turn it on.
-        
-        # TODO change instance type!
-        conn = self.ec2_client.run_instances(InstanceType="t2.micro", 
+        # no instance backup support atm
+        conn = self.ec2_client.run_instances(InstanceType=INSTANCE_PRIORITIES[0], 
                             MaxCount=1, 
-                            MinCount=1, 
-                            ImageId="ami-0b59bfac6be064b78") 
-
+                            MinCount=1,
+                            SecurityGroupIds=config["ec2_secgroupids"],
+                            ImageId=config["ec2_ami"],
+                            KeyName="pootis-proxy-key", 
+                            IamInstanceProfile={
+                                'Arn': 'arn:aws:iam::588801620431:instance-profile/AmazonSSMRoleForInstancesQuickSetup', 
+                            }) 
+        
         instance = conn.get("Instances", None)
         if not instance:
             print("Failed to create EC2 instance")
             return None
 
+        waiter = self.ec2_client.get_waiter('instance_running')
+        waiter.wait(InstanceIds=[instance[0]['InstanceId']])
+
+        # NOTE - max of 5 Elastic IPs, keep tabs on that
         try:
-            allocation = ec2.allocate_address(Domain='vpc')
-            response = ec2.associate_address(AllocationId=allocation['AllocationId'], InstanceId=instance['InstanceId'])
+            allocation = self.ec2_client.allocate_address(Domain='vpc')
+            response = self.ec2_client.associate_address(AllocationId=allocation['AllocationId'], InstanceId=instance[0]['InstanceId'])
         except ClientError as e:
             print(e)
-        self.instance_to_ip_id[instance['InstanceId']] = allocation['AllocationId']
+        self.instance_to_ip_id[instance[0]['InstanceId']] = allocation['AllocationId']
+        print("Created new instance class")
 
-        new_instance = EC2Instance(instance)
+        # set mumble / bot IP in envvar for tf2 server / other use?
+        new_instance = EC2Instance(instance[0], allocation["PublicIp"])
         return new_instance
 
     # Monitor people currently in lobby or mumble as a whole, may not necessarily spin down
@@ -112,9 +132,12 @@ class EC2Interface:
 
         turn_off_instance = mumble_client.users.count() < config["min_total_players"]
 
-        if turn_off_instance and ec2_instance in self.ec2_instance_pool:
-            self.ec2_instance_pool.remove(ec2_instance)
+        if turn_off_instance:
+            del self.instance_to_ip_id[ec2_instance.ec2_credentials["instance-id"]]
             ec2_instance.turn_off_server()
+            if ec2_instance in self.ec2_instance_pool:
+                self.ec2_instance_pool.remove(ec2_instance)
+            
 
     def spin_down_instance(self, ec2_instance, use_mumble_monitoring=False, mumble_client=None):
         if use_mumble_monitoring:
@@ -132,7 +155,6 @@ class EC2Interface:
             print(e)
         
         del self.instance_to_ip_id[instance_id]
-
         ec2_instance.turn_off_server()
         
 
@@ -144,8 +166,19 @@ class TF2Interface:
 
     def await_connect_to_server(self):
         # TODO run multiple times?
-        self.client.connect()
-        self.client.authenticate()
+        retry_count = 0
+        while retry_count < 10:
+            try:
+                self.client = RCON(self.ip_port, self.rcon)
+                self.client.connect()
+                self.client.authenticate()
+                return True
+            except Exception as e:
+                print(e)
+                print("Failed connecting to tf2, retrying ", retry_count)
+                retry_count += 1
+                time.sleep(20)
+        return False
 
     def rcon_command(self, command):
         response = self.client.execute(command)
@@ -153,6 +186,3 @@ class TF2Interface:
 
     def close(self):
         self.client.close()
-
-if __name__ == '__main__':
-    pass

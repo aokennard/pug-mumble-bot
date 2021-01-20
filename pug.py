@@ -1,5 +1,7 @@
 from clients import EC2Instance, TF2Interface
 from config import config
+import string
+import random
 
 DEFAULT_PASSWORD_LENGTH = config["password_length"]
 DEFAULT_RCON_LENGTH = config["rcon_length"]
@@ -18,17 +20,16 @@ def generate_random_string(length):
     return ''.join(random.choice(alphabet) for i in range(length))
 
 class Pug:
-    def __init__(self, pug_number, ec2_instance):
+    def __init__(self, pug_number):
         self.pug_number = pug_number
         self.pug_state = PugState.NOT_STARTED
-        self.players = {"RED" : [], "BLU" : []}
-
-        self.connect_ip = ec2_instance.ec2_credentials["ec2-ip"]
+        self.players = {config["RED"] : [], config["BLU"] : []}
+        
         self.connect_pass = generate_random_string(DEFAULT_PASSWORD_LENGTH)
         self.rcon = generate_random_string(DEFAULT_RCON_LENGTH)
-        
-        self.ec2_instance = ec2_instance
-        self.tf2_client = None
 
-    def start_tf2_client(self):
-        self.tf2_client = TF2Interface(self.connect_ip, DEFAULT_PORT, self.rcon)
+    def set_ip(self, ip):
+        self.connect_ip = ip
+
+    def get_tf2_client(self):
+        return TF2Interface(self.connect_ip, DEFAULT_PORT, self.rcon)
