@@ -113,16 +113,18 @@ class CommandRegister(object):
 cmd = CommandRegister()
 
 class MumbleBot:
-    # TODO: on restarting in a mumble, analyze channels / try to use a file to regain pug states - test
     # TODO: channel perms
+    # TODO: theory - use ML and voice activity during picking to automove players (get caps, pick lolguy, or just 'froot' and moves)
     # TODO: reap zombies
     # TODO: better style / helpers
+    # TODO: Test once AMI is changed to no longer ./tf2.sh on startup service
     # TODO: statistics gathering on players, times for pugs / spin up etc
     def __init__(self, server_ip, server_port, nickname, password):
         self.mumble_client = pymumble.Mumble(server_ip, nickname, password=password, port=server_port, debug=False)
         
         self.saveable = Saveable()
         self.clients = [None] * (config["max_pugs"] + 1)
+        self.ec2_clients = [None] * (config["max_pugs"] + 1)
 
         self.pug_channels = dict()
         self.ec2_interface = EC2Interface(auth.get_aws_key_id(), auth.get_access_key())
@@ -141,10 +143,12 @@ class MumbleBot:
 
         self.setup_mumble_callbacks()
         self.create_base_channels()
-        # populates self.admins
+
         # TODO possible race condition with user_id on joining?
         self.mumble_client.channels[0].get_acl()
         self.mumble_client.users.myself.move_in(self.root_channel["channel_id"])
+
+        self.try_reconnect()
 
 
     # Callbacks
@@ -205,7 +209,7 @@ class MumbleBot:
         self.pug_channels[pug_number] = [new_pug_channel, new_blu_channel, new_red_channel]
 
     def create_base_channels(self):
-        # bot exists in Root - TODO get perms
+        # bot exists in root ATM
         self.root_channel = self.get_or_create_channel(ROOT_NAME, self.mumble_client.my_channel()["channel_id"], temporary=False)
         self.lobby_channel = self.get_or_create_channel(LOBBY_NAME, self.root_channel["channel_id"], temporary=False)
         self.volunteer_channel = self.get_or_create_channel(VOLUNTEER_NAME, self.lobby_channel["channel_id"], temporary=False)
@@ -269,7 +273,8 @@ class MumbleBot:
         # pug_channel_root = self.pug_channels.get(pug_number)
 
         self.set_pug(pug_number, None)
-        self.clients[pug_number] = None
+        #self.clients[pug_number] = None
+        self.ec2_clients[pug_number] = None
         # pug_channel_root.remove()
         #del self.pug_channels[pug_number]
 
@@ -282,6 +287,21 @@ class MumbleBot:
                 return args[0]
             return int(args[0]) if args[0].isnumeric() else -1
         return -1
+
+    def try_reconnect(self):
+        def reconnect_pug_client(pug_number):
+            pug = self.get_pug(pug_number)
+            if pug != None and pug.connect_ip != None:
+                ec2_instance = self.ec2_interface.get_instance_from_ip(pug.connect_ip)
+                if ec2_instance != None:
+                    self.ec2_clients[pug_number] = ec2_instance
+                if pug.rcon != None:
+                    self.clients[pug_number] = pug.get_tf2_client()
+                    self.clients[pug_number].auth()
+
+        if os.path.exists(config["bot_data_store_name"]):
+            for pug_number in range(1, config["max_pugs"] + 1):
+                reconnect_pug_client(pug_number)
 
     # Messaging / commands
     def send_user_message(self, receiver, message):
@@ -325,18 +345,28 @@ class MumbleBot:
             self.send_user_message(sender, "EC2 instance failed startup")
             return
 
-        # TODO run this with SSM, as we will NEED to manually do an rcon/pass command, as we may have a reused instance
-        time.sleep(2 * 60)
-        ec2_instance.run_command(self.ec2_interface.ssm_client, "echo 'test' > /tmp/hellothere")
-        ec2_instance.run_command(self.ec2_interface.ssm_client, APPEND_TF2_CFG_DATA.format(current_pug.rcon, current_pug.connect_pass, path=config["tf2_config_path"]))
+        self.ec2_clients[pug_number] = ec2_instance
         current_pug.set_ip(ec2_instance.get_ip())
-        ec2_instance.await_instance_startup()
+        tf2_client = self.clients[pug_number]
+        if ec2_instance.server_up:
+            current_pug.rcon = tf2_client.rcon
+            tf2_client.rcon_command("sv_password {}".format(current_pug.connect_pass))
+            print("pug num and pass: ", pug_number, current_pug.connect_pass)
+        else:
+            time.sleep(2 * 60) # check if reused instance?
+            ec2_instance.run_command(self.ec2_interface.ssm_client, "echo 'test' > /tmp/hellothere")
+            ec2_instance.run_command(self.ec2_interface.ssm_client, APPEND_TF2_CFG_DATA.format(current_pug.rcon, current_pug.connect_pass, path=config["tf2_config_path"]))
+            ec2_instance.await_instance_startup()
+            if tf2_client:
+                tf2_client.close()
+            tf2_client = current_pug.get_tf2_client()
 
         # Start running commands for TF2 server / setup.
         print("tf2 server startup")
-        current_pug.get_tf2_client()
+        self.clients[pug_number] = tf2_client
+        
         # blocks
-        connected = current_pug.tf2_client.await_connect_to_server()
+        connected = tf2_client.await_connect_to_server()
         if not connected:
             self.send_user_message(sender, "Unable to connect to TF2 server")
             # restart EC2 instance / grab new instance? TODO
@@ -346,19 +376,23 @@ class MumbleBot:
         print("Run RCON stuff here")
 
         ip = requests.get('https://checkip.amazonaws.com').text.strip()
-        current_pug.tf2_client.rcon_command("mbl_bot_address {}".format(ip))
+        tf2_client.rcon_command("mbl_bot_address {}".format(ip))
 
         # Wait here for TF2 SM plugin to send a message to a socket saying its setup? TODO
         self.send_user_message(sender, "Done with TF2 server setup for pug {}".format(str(pug_number)))
+        ec2_instance.server_up = True
         
     # Commands
-
     @cmd.new("state")
     def state(self, *args):
         self.send_user_message(args[-1], "Pug bot state: " + str(self.pug_bot_state))
 
     @cmd.new("quit")
     def stop(self, *args):
+        for pug_number in range(1, config["max_pugs"] + 1):
+            if self.clients[pug_number]:
+                self.clients[pug_number].close()
+                self.clients[pug_number] = None
         self.mumble_client.stop()
         self.active = False
         os.remove(config["bot_data_store_name"])
@@ -488,6 +522,7 @@ class MumbleBot:
         while self.pug_bot_state != BotState.MEDICS_PICKED:
             time.sleep(5) 
             print(self.pug_bot_state, "Waiting for med pics")
+
         print("Picking state now")
 
         # first or 2nd pick? random or rng?
@@ -504,6 +539,7 @@ class MumbleBot:
                 break
             time.sleep(5)
             print("Picking, current number of people in pug: ", pugger_count)
+
         print("Done picking")
 
         self.pug_bot_state = BotState.SENDING_INFO
@@ -520,6 +556,7 @@ class MumbleBot:
         self.message_pug_channel(pug_number, CONNECT_STRING.format(new_pug.connect_ip, new_pug.connect_pass))
         
         self.pug_bot_state = BotState.SENT_INFO
+        print("Info sent, server setup")
 
         # Anything else here?
         self.set_active_picking_pug(-1)
@@ -542,7 +579,7 @@ class MumbleBot:
 
         users = self.get_pug_users(pug_number)
         if not users:
-            self.send_user_message(sender, "Pug channel not found, cannot move out / remove")
+            self.send_user_message(sender, "Pug channel / users not found, cannot move out / remove")
             return BotState.IDLE
 
         for user in users:
@@ -580,7 +617,7 @@ class MumbleBot:
 
         print("Spinning down pug server")
         # using mumble monitoring, may not spin down 
-        spindown_thread = threading.Thread(target=self.ec2_interface.spin_down_instance, args=(pug.ec2_instance,), kwargs={'use_mumble_monitoring':config["use_mumble_monitoring"], 'mumble_client':self.mumble_client})
+        spindown_thread = threading.Thread(target=self.ec2_interface.spin_down_instance, args=(self.ec2_clients[pug_number],), kwargs={'use_mumble_monitoring':config["use_mumble_monitoring"], 'mumble_client':self})
         spindown_thread.start()
 
         # Dumps people to lobby channel, but we may need to lock lobby when picking.
@@ -643,9 +680,12 @@ class MumbleBot:
 
     @cmd.new("rcon")  
     def execute_rcon_command(self, *args):
-        pug_number = args[0]
+        pug_number = self.checked_pug_number(args)
+        if pug_number == -1:
+            self.send_user_message(args[-1], "Invalid pug number given")
+            return
         command = args[1]
-        client = self.clients.get(pug_number)
+        client = self.clients[pug_number]
         if client:
             client.rcon_command(command)
         else:

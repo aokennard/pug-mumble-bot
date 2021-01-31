@@ -24,6 +24,7 @@ class EC2Instance:
         self._instance = instance
         self.ec2_credentials = {"ec2-ip" : ip, "instance-id" : instance.get("InstanceId")}
         self.ec2_misc = dict()
+        self.server_up = False
 
     def create_tags(self, tags):
         self._instance.create_tags(Resources=[self.ec2_credentials["instance-id"]], Tags=tags)
@@ -66,15 +67,16 @@ class EC2Instance:
         sock.close()
 
     # TODO turn off tf2 + misc 
-    def turn_off_server(self):
-        self.run_command("killall srcds_linux")
+    def turn_off_server(self, client):
+        self.run_command(client, "killall srcds_linux")
+        self.server_up = False
 
 
 class EC2Interface:
     def __init__(self, key_id="", access_key=""):
         self.ec2_client = self.setup_client('ec2', key_id, access_key)
         self.ssm_client = self.setup_client('ssm', key_id, access_key)
-        self.instance_to_ip_id = dict()
+        #self.instance_to_ip_id = dict()
         self.ec2_instance_pool = []
 
     # no support for region priorities atm
@@ -83,6 +85,13 @@ class EC2Interface:
             region_name=REGION_PRIORITIES[0], 
             aws_access_key_id=key_id, 
             aws_secret_access_key=access_key)
+
+    def get_instance_from_ip(self, ip):
+        instance_dict = self.ec2_client.describe_instances()
+        for instance in instance_dict["Reservations"][0]["Instances"]:
+            if instance["PublicIpAddress"] == ip:
+                return EC2Instance(instance, ip)
+        return None
 
     def create_ec2_instance(self, init_script=None):
         if len(self.ec2_instance_pool) != 0:
@@ -100,43 +109,37 @@ class EC2Interface:
                                 'Arn': 'arn:aws:iam::588801620431:instance-profile/AmazonSSMRoleForInstancesQuickSetup', 
                             }) 
         
-        instance = conn.get("Instances", None)
+        instance = conn.get("Instances")
+        print(instance)
         if not instance:
             print("Failed to create EC2 instance")
             return None
 
         waiter = self.ec2_client.get_waiter('instance_running')
         waiter.wait(InstanceIds=[instance[0]['InstanceId']])
-
-        # NOTE - max of 5 Elastic IPs, keep tabs on that
-        try:
-            allocation = self.ec2_client.allocate_address(Domain='vpc')
-            response = self.ec2_client.associate_address(AllocationId=allocation['AllocationId'], InstanceId=instance[0]['InstanceId'])
-        except ClientError as e:
-            print(e)
-        self.instance_to_ip_id[instance[0]['InstanceId']] = allocation['AllocationId']
-        print("Created new instance class")
+        
+        response = self.ec2_client.describe_instances(InstanceIds=[instance[0]['InstanceId']])
+        public_ip = response["Reservations"][0]["Instances"][0]["PublicIpAddress"]
 
         # set mumble / bot IP in envvar for tf2 server / other use?
-        new_instance = EC2Instance(instance[0], allocation["PublicIp"])
+        new_instance = EC2Instance(instance[0], public_ip)
         return new_instance
 
     # Monitor people currently in lobby or mumble as a whole, may not necessarily spin down
     def monitor_mumble_spin_down(self, ec2_instance, mumble_client):
         self.ec2_instance_pool.append(ec2_instance)
-
-        turn_off_instance = True
-
         # Work - naive for now, make better later TODO
         time.sleep(60)
 
-        turn_off_instance = mumble_client.users.count() < config["min_total_players"]
+        turn_off_instance = len(mumble_client.get_lobby_users(use_chill_room=False)) < config["min_total_players"]
 
         if turn_off_instance:
-            del self.instance_to_ip_id[ec2_instance.ec2_credentials["instance-id"]]
-            ec2_instance.turn_off_server()
+            print("Mumble monitor turning off instance")
+            self.turn_off_instance(ec2_instance)
+        else:
             if ec2_instance in self.ec2_instance_pool:
                 self.ec2_instance_pool.remove(ec2_instance)
+            print("Mumble monitor is keeping instance alive")
             
 
     def spin_down_instance(self, ec2_instance, use_mumble_monitoring=False, mumble_client=None):
@@ -144,19 +147,21 @@ class EC2Interface:
             if mumble_client:
                 self.monitor_mumble_spin_down(ec2_instance, mumble_client)
                 return
-            print("Now performing spin down default spin down")
+    
+        print("Now performing spin down default spin down")
+        self.turn_off_instance(ec2_instance)
 
-        instance_id = ec2_instance.ec2_credentials["instance-id"]
+    def turn_off_instance(self, instance):
+        instance_id = instance.ec2_credentials["instance-id"]
+        instance.turn_off_server(self.ssm_client)
 
         try:
-            self.ec2_client.release_address(AllocationId=self.instance_to_ip_id[instance_id])
-            self.ec2_client.stop_instances(InstanceIds=[instance_id])
+            #self.ec2_client.release_address(AllocationId=self.instance_to_ip_id[instance_id])
+            self.ec2_client.terminate_instances(InstanceIds=[instance_id])
         except ClientError as e:
             print(e)
         
-        del self.instance_to_ip_id[instance_id]
-        ec2_instance.turn_off_server()
-        
+        #del self.instance_to_ip_id[instance_id]    
 
 class TF2Interface:
     def __init__(self, ip, port, rcon):
@@ -165,24 +170,33 @@ class TF2Interface:
         self.client = RCON(self.ip_port, rcon)
 
     def await_connect_to_server(self):
-        # TODO run multiple times?
         retry_count = 0
         while retry_count < 10:
             try:
                 self.client = RCON(self.ip_port, self.rcon)
-                self.client.connect()
-                self.client.authenticate()
+                self.auth()
                 return True
             except Exception as e:
                 print(e)
                 print("Failed connecting to tf2, retrying ", retry_count)
                 retry_count += 1
+                self.close()
                 time.sleep(20)
         return False
+
+    def update_rcon(self, new_rcon):
+        self.rcon_command("rcon_password {}".format(new_rcon))
+        self.rcon = new_rcon
+        self.client = RCON(self.ip_port, self.rcon)
+        self.auth()
 
     def rcon_command(self, command):
         response = self.client.execute(command)
         return response
+
+    def auth(self):
+        self.client.connect()
+        self.client.authenticate()
 
     def close(self):
         self.client.close()
