@@ -141,7 +141,6 @@ class EC2Interface:
                 self.ec2_instance_pool.remove(ec2_instance)
             print("Mumble monitor is keeping instance alive")
             
-
     def spin_down_instance(self, ec2_instance, use_mumble_monitoring=False, mumble_client=None):
         if use_mumble_monitoring:
             if mumble_client:

@@ -17,6 +17,7 @@ import argparse
 import requests
 import pickle
 import os
+import socket
 
 HELP_STRING = """Bot commands:<br>
     <span style="color:red">Red text</span> indicates required argument, <span style="color:blue">blue text</span> is optional
@@ -149,6 +150,8 @@ class MumbleBot:
         self.mumble_client.users.myself.move_in(self.root_channel["channel_id"])
 
         self.try_reconnect()
+        tf2_recv_thread = threading.Thread(target=self.tf2_monitor_thread)
+        tf2_recv_thread.start()
 
 
     # Callbacks
@@ -303,9 +306,17 @@ class MumbleBot:
             for pug_number in range(1, config["max_pugs"] + 1):
                 reconnect_pug_client(pug_number)
 
+    def get_pug_number_by_ip(self, ip):
+        for pug_number in range(1, config["max_pugs"] + 1):
+            pug = self.get_pug(pug_number)
+            if pug and pug.connect_ip == ip:
+                return pug_number
+        return -1
+
     # Messaging / commands
     def send_user_message(self, receiver, message):
-        self.mumble_client.users[receiver].send_text_message(message)
+        if receiver != -1:
+            self.mumble_client.users[receiver].send_text_message(message)
 
     def error_message(self, *args):
         if isinstance(args[0], MumbleBot):
@@ -325,16 +336,25 @@ class MumbleBot:
         process_function = self.get_bot_command(message_split[0])
         process_function(self, *message_split[1:], sender)
 
+    def get_my_ip(self):
+        return requests.get('https://checkip.amazonaws.com').text.strip()
+
     # Threading
-    def medic_immunity_check(self):
+    def medic_immunity_check_thread(self):
         def immunity_callback():
-            time.sleep(60 * 60 * config["medic_immunity_reset_hours"])
+            cur_time = time.time()
+            end_time = cur_time + 60 * 60 * config["medic_immunity_reset_hours"]
+            while cur_time < end_time:
+                if not self.active:
+                    return
+                cur_time = time.time()
+                time.sleep(60)
             # somewhat lazy, but this should account for when pugs die.
             # optimistically assumes after "medic_immunity_reset_hours" hours that we can say pugs are reset
             if len(self.get_lobby_users()) < config["min_total_players"]:
                 self.reset_medic_immunity()
 
-        threading.Thread(target=immunity_callback).start()          
+        return threading.Thread(target=immunity_callback)       
 
     def handle_server_startup(self, pug_number, sender):
         current_pug = self.get_pug(pug_number)
@@ -348,10 +368,11 @@ class MumbleBot:
         self.ec2_clients[pug_number] = ec2_instance
         current_pug.set_ip(ec2_instance.get_ip())
         tf2_client = self.clients[pug_number]
+        # if we are reusing an active EC2 instance, just change PW
         if ec2_instance.server_up:
             current_pug.rcon = tf2_client.rcon
             tf2_client.rcon_command("sv_password {}".format(current_pug.connect_pass))
-            print("pug num and pass: ", pug_number, current_pug.connect_pass)
+        # otherwise, do first time setup
         else:
             time.sleep(2 * 60) # check if reused instance?
             ec2_instance.run_command(self.ec2_interface.ssm_client, "echo 'test' > /tmp/hellothere")
@@ -375,13 +396,33 @@ class MumbleBot:
         current_pug.pug_state = tf2pug.PugState.TF2_SERVER_ACTIVE
         print("Run RCON stuff here")
 
-        ip = requests.get('https://checkip.amazonaws.com').text.strip()
+        ip = self.get_my_ip()
         tf2_client.rcon_command("mbl_bot_address {}".format(ip))
 
-        # Wait here for TF2 SM plugin to send a message to a socket saying its setup? TODO
         self.send_user_message(sender, "Done with TF2 server setup for pug {}".format(str(pug_number)))
         ec2_instance.server_up = True
         
+    def tf2_monitor_thread(self):
+        listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        #listen_socket.settimeout(5)
+        try:
+            listen_socket.bind(('', config['tf2_listen_port']))
+        except socket.error as e:
+            print('Bind fail - ERRNO: {}, Message: {}'.format(e[0], e[1]))
+            return
+        listen_socket.listen(config["max_pugs"])
+        print("socket live")
+        while self.active:
+            conn, addr = listen_socket.accept()
+            if conn:
+                with conn:
+                    print('Connected with {}:{}'.format(addr[0], addr[1]))
+                    pug_number = self.get_pug_number_by_ip(addr)
+                    data = conn.recv(1024)
+                    if data and data == "end" and pug_number != -1:                
+                        self.end_pug_command(pug_number, -1)
+
+            
     # Commands
     @cmd.new("state")
     def state(self, *args):
@@ -492,6 +533,7 @@ class MumbleBot:
             return BotState.IDLE
 
         self.pug_bot_state = BotState.STARTING
+
         pug_number = self.get_new_pug_number()
         if pug_number is None:
             self.send_user_message(sender, "Unable to start new pug, max limit of pugs reached")
@@ -571,11 +613,10 @@ class MumbleBot:
     @cmd.new("dump")
     def dump_channel_and_cleanup(self, *args):
         pug_number = self.checked_pug_number(args)
+        sender = args[-1]
         if pug_number == -1:
             self.send_user_message(sender, "Invalid arguments")
             return BotState.IDLE
-
-        sender = args[-1]     
 
         users = self.get_pug_users(pug_number)
         if not users:
@@ -589,7 +630,8 @@ class MumbleBot:
         self.remove_pug_data(pug_number)
 
         # Starts a callback which may clear the medic immunity set
-        self.medic_immunity_check()
+        med_immunity_thread = self.medic_immunity_check_thread()
+        med_immunity_thread.start()
 
         self.send_user_message(sender, "Ended pug {}".format(str(pug_number)))
 
@@ -605,7 +647,7 @@ class MumbleBot:
             self.send_user_message(sender, "Invalid arguments")
             return BotState.IDLE
 
-        override = False
+        override = 0
         if len(args) > 2:
             override = int(args[1]) if (type(args[1]) == str and args[1].isnumeric()) or type(args[1]) == int else 0
 
@@ -615,7 +657,7 @@ class MumbleBot:
             self.send_user_message(sender, "Pug not found, cannot end")
             return BotState.IDLE
 
-        print("Spinning down pug server")
+        print("Starting spin down EC2 thread")
         # using mumble monitoring, may not spin down 
         spindown_thread = threading.Thread(target=self.ec2_interface.spin_down_instance, args=(self.ec2_clients[pug_number],), kwargs={'use_mumble_monitoring':config["use_mumble_monitoring"], 'mumble_client':self})
         spindown_thread.start()
@@ -684,6 +726,7 @@ class MumbleBot:
         if pug_number == -1:
             self.send_user_message(args[-1], "Invalid pug number given")
             return
+
         command = args[1]
         client = self.clients[pug_number]
         if client:
