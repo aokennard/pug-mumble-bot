@@ -27,6 +27,7 @@ class Pug:
         
         self.connect_pass = generate_random_string(DEFAULT_PASSWORD_LENGTH)
         self.rcon = generate_random_string(DEFAULT_RCON_LENGTH)
+        self.connect_ip = None
 
     def set_ip(self, ip):
         self.connect_ip = ip

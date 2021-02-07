@@ -69,6 +69,7 @@ class EC2Instance:
     # TODO turn off tf2 + misc 
     def turn_off_server(self, client):
         self.run_command(client, "killall srcds_linux")
+        self.run_command(client, "killall srcds_run")
         self.server_up = False
 
 

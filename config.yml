@@ -23,7 +23,7 @@ instance_priorities:
 - c5a.large
 aws_key_id_filename: secrets/aws_key_id
 aws_access_key_filename: secrets/aws_access_key
-ec2_ami: ami-03ea1b5724483c472
+ec2_ami: ami-0aa50d16925dbb903
 ec2_secgroupids:
 - sg-0508f87e0dba26c1a
 tf2_config_path: /home/ubuntu/tf2server/hlserver/tf/cfg/server.cfg

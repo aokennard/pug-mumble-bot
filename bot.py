@@ -25,7 +25,7 @@ HELP_STRING = """Bot commands:<br>
     <li>mute - Mutes all users in lobby, volunteer, and chill channel</li>
     <li>unmute - Unmutes all users in lobby, volunteer, and chill channel</li>
     <li>help - Displays this help message</li>
-    <li>start - Starts pug: creates channels, acquires server, sets up TF2 server, medic rolling logic, info sending</li>
+    <li>start - Starts pug: creates channels (not atm), acquires server, sets up TF2 server, medic rolling logic, info sending</li>
     <li>end <span style="color:red">pug-number</span> <span style="color:blue">[override: 0 or 1]</span>
      - Ends pug: removes channels (with a delay, unless the override is 1), tells server to shut down (possibly), moves users to lobby</li>
     <li>roll - Uses the active pug kept by the bot + volunteers in the channel to roll medics and move them into proper create_base_channels</li>
@@ -48,7 +48,7 @@ sudo killall srcds_linux;
 /bin/echo '' >> {path};
 /bin/echo -n 'rcon_password {}; sv_password {};' >> {path};
 cd /home/ubuntu/tf2server/hlserver;
-./tf2.sh;
+sudo -u ubuntu ./tf2.sh;
 '''
 
 CONNECT_STRING = 'connect {}; password {}' # '<a href="steam://connect/{}/{}">Connect to server</a>' # use DNS?
@@ -114,9 +114,10 @@ class CommandRegister(object):
 cmd = CommandRegister()
 
 class MumbleBot:
-    # TODO: channel perms
+    # TODO: channel perms, link pug channels
     # TODO: theory - use ML and voice activity during picking to automove players (get caps, pick lolguy, or just 'froot' and moves)
     # TODO: reap zombies
+    # TODO: command locking - start / end multiple pugs same time, etc
     # TODO: better style / helpers
     # TODO: Test once AMI is changed to no longer ./tf2.sh on startup service + new plugin
     # TODO: statistics gathering on players, times for pugs / spin up etc
@@ -153,7 +154,6 @@ class MumbleBot:
         tf2_recv_thread = threading.Thread(target=self.tf2_monitor_thread)
         tf2_recv_thread.start()
 
-
     # Callbacks
     def setup_mumble_callbacks(self):
         self.mumble_client.callbacks.set_callback(RCV, self.message_received)
@@ -164,7 +164,7 @@ class MumbleBot:
         for group in event.groups:
             if group.name == "admin":
                 self.admins = [user for user in group.add]
-                print(self.mumble_client.users)
+                print(self.mumble_client.users, self.admins)
                 break
 
     def user_created(self, new_user):
@@ -175,7 +175,9 @@ class MumbleBot:
             
         # https://github.com/azlux/pymumble/blob/pymumble_py3/pymumble_py3/mumble_pb2.py#L1060
         self.send_user_message(sender, "yo")
-        uid = self.mumble_client.users[sender]["user_id"]
+        uid = None
+        if self.mumble_client.users[sender] and "user_id" in self.mumble_client.users[sender]:
+            uid = self.mumble_client.users[sender]["user_id"]
 
         if uid and uid in self.admins:
             self.process_message(proto_message.message, sender)
@@ -228,7 +230,7 @@ class MumbleBot:
     def get_lobby_users(self, use_chill_room=True):
         lobby_users = self.lobby_channel.get_users() + self.volunteer_channel.get_users()
         if use_chill_room:
-            lobby_users += set(self.chill_channel.get_users())
+            lobby_users += self.chill_channel.get_users()
         return lobby_users
 
     def get_mumble_usernames(self, name_only=False):
@@ -503,6 +505,11 @@ class MumbleBot:
 
         # we pick the rest of the medics
         if medics_to_pick > 0:
+            #weights = [1] * len(lobby_players_without_immunity)
+            #for i, player in enumerate(lobby_players_without_immunity):
+            #    if "yight" == player["name"]:
+            #        weights[i] = 10
+
             medics.extend(random.sample(lobby_players_without_immunity, medics_to_pick))
 
         pug_channels = self.pug_channels[self.get_active_picking_pug()]
@@ -726,7 +733,7 @@ class MumbleBot:
             self.send_user_message(args[-1], "Invalid pug number given")
             return
 
-        command = args[1]
+        command = " ".join(args[1:-1])
         client = self.clients[pug_number]
         if client:
             client.rcon_command(command)
@@ -744,7 +751,5 @@ if __name__ == '__main__':
 
     bot = MumbleBot(args.host, args.port, args.name, args.pw)
 
-    while True:
-        if not bot.active:
-            break
+    while bot.active:
         time.sleep(3)
