@@ -51,7 +51,7 @@ cd /home/ubuntu/tf2server/hlserver;
 sudo -u ubuntu ./tf2.sh;
 '''
 
-CONNECT_STRING = 'connect {}; password {}' # '<a href="steam://connect/{}/{}">Connect to server</a>' # use DNS?
+CONNECT_STRING = '<a href="steam://connect/{}/{}">Connect to server</a>' # use DNS?
 
 ROOT_NAME = config["root_name"]
 LOBBY_NAME = config["lobby_name"]
@@ -421,6 +421,8 @@ class MumbleBot:
                     data = conn.recv(1024)
                     if data and data == "end" and pug_number != -1:                
                         self.end_pug_command(pug_number, -1)
+                        # hacky but works
+                        self.rcon_command(pug_number, "sm plugins reload sm-bot-interface", -1)
             
     # Commands
     @cmd.new("state")
