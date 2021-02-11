@@ -240,6 +240,15 @@ class MumbleBot:
             mumble_users.append(user)
         return mumble_users
 
+    def connect_lobby_with_pug(self, pug_number, link_channels=True):
+        red_channel, blu_channel = self.pug_channels[pug_number][1:]
+        if link_channels:
+            red_channel.link(self.lobby_channel["channel_id"])
+            blu_channel.link(self.lobby_channel["channel_id"])
+        else:
+            red_channel.unlink_all()
+            blu_channel.unlink_all()
+
     # Pug data
     def get_new_pug_number(self):
         pug_number = 1
@@ -310,7 +319,7 @@ class MumbleBot:
     def get_pug_number_by_ip(self, ip):
         for pug_number in range(1, config["max_pugs"] + 1):
             pug = self.get_pug(pug_number)
-            if pug and pug.connect_ip == ip:
+            if pug and pug.connect_ip == ip[0]:
                 return pug_number
         return -1
 
@@ -419,7 +428,7 @@ class MumbleBot:
                     print('Connected with {}:{}'.format(addr[0], addr[1]))
                     pug_number = self.get_pug_number_by_ip(addr)
                     data = conn.recv(1024)
-                    if data and data == "end" and pug_number != -1:                
+                    if pug_number != -1:                
                         self.end_pug_command(pug_number, -1)
                         # hacky but works
                         self.rcon_command(pug_number, "sm plugins reload sm-bot-interface", -1)
@@ -563,6 +572,8 @@ class MumbleBot:
         self.pug_bot_state = BotState.MEDIC_PICKING
         print("picking medics")
 
+        self.connect_lobby_with_pug(pug_number, link_channels=True)
+
         # Roll medics automatically, or wait
         if self.auto_roll:
             time.sleep(config["autoroll_delay"])  
@@ -592,6 +603,7 @@ class MumbleBot:
             time.sleep(5)
             print("Picking, current number of people in pug: ", pugger_count)
 
+        self.connect_lobby_with_pug(pug_number, link_channels=False)
         self.pug_bot_state = BotState.SENDING_INFO
         print("Done picking, sending info / waiting on server setup")
 
