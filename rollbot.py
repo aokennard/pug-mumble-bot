@@ -26,6 +26,7 @@ class RollBot:
         self.immune_players = []
         self.lobby = self.client.channels.find_by_name(LOBBY_NAME)
         self.client.callbacks.set_callback(RCV, self.message_received)
+        self.client.users.myself.comment("commands: roll [number], add [name] (add to immunity list), rm [name] (remove from list), clearimm (fully clear list)")
     
     def send_message(self, sender, message):
         self.client.users[sender].send_text_message(message)
@@ -96,7 +97,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Create a mumble bot for a designated server")
     parser.add_argument('--host', type=str, help="A string of the server IP/hostname", default='outcheapugs.cheapmumble.com')
     parser.add_argument('--port', type=int, help="An int of the servers port", default=2283)
-    parser.add_argument('--name', type=str, help="Optional bot name", default='rollbot')
+    parser.add_argument('--name', type=str, help="Optional bot name", default='rollbot (comment)')
     parser.add_argument('--pw', type=str, help="Optional password for server", default='')
     args = parser.parse_args()
 

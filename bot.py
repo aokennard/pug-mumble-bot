@@ -240,14 +240,20 @@ class MumbleBot:
             mumble_users.append(user)
         return mumble_users
 
+    # TODO use git version of pymumble as it has channel linking
     def connect_lobby_with_pug(self, pug_number, link_channels=True):
         red_channel, blu_channel = self.pug_channels[pug_number][1:]
         if link_channels:
             red_channel.link(self.lobby_channel["channel_id"])
             blu_channel.link(self.lobby_channel["channel_id"])
         else:
-            red_channel.unlink_all()
-            blu_channel.unlink_all()
+           red_channel.unlink(self.lobby_channel["channel_id"])
+           red_channel.unlink(self.volunteer_channel["channel_id"])
+           red_channel.unlink(self.chill_channel["channel_id"])
+           red_channel.unlink(blu_channel["channel_id"])
+           blu_channel.unlink(self.lobby_channel["channel_id"])
+           blu_channel.unlink(self.volunteer_channel["channel_id"])
+           blu_channel.unlink(self.chill_channel["channel_id"])
 
     # Pug data
     def get_new_pug_number(self):
@@ -431,7 +437,7 @@ class MumbleBot:
                     if pug_number != -1:                
                         self.end_pug_command(pug_number, -1)
                         # hacky but works
-                        self.rcon_command(pug_number, "sm plugins reload sm-bot-interface", -1)
+                        self.execute_rcon_command(pug_number, "sm plugins reload sm-bot-interface", -1)
             
     # Commands
     @cmd.new("state")
