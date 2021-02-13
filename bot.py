@@ -1,4 +1,4 @@
-import pymumble_py3 as pymumble
+import pymumble.pymumble_py3 as pymumble
 from pymumble_py3.messages import TextMessage, MoveCmd
 from pymumble_py3.constants import PYMUMBLE_MSG_TYPES_USERSTATS
 from pymumble_py3.callbacks import PYMUMBLE_CLBK_TEXTMESSAGERECEIVED as RCV

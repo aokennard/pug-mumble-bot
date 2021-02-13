@@ -10,7 +10,7 @@ password_length: 12
 rcon_length: 20
 tf2_port: 27015
 tf2_listen_port: 5000
-min_total_players: 4
+min_total_players: 12
 region_priorities:
 - us-east-2
 - us-east-1
@@ -31,6 +31,6 @@ bot_data_store_name: mumble_bot_store.dat
 use_mumble_monitoring: true
 medic_immunity_reset_hours: 6
 autoroll_delay: 5
-end_pug_delay: 20
+end_pug_delay: 10
 ec2_retry_delay: 10
 ec2_num_retries: 10
