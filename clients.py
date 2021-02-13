@@ -139,7 +139,7 @@ class EC2Interface:
         time.sleep(60)
         
         active_players = len(mumble_client.get_lobby_users(use_chill_room=False))
-        for pug in config["max_pugs"]:
+        for pug in range(1, config["max_pugs"]):
             active_players += mumble_client.get_pug_users(pug)
 
         turn_off_instance = active_players < config["min_total_players"]

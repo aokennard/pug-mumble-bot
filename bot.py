@@ -425,6 +425,7 @@ class MumbleBot:
     def tf2_monitor_thread(self):
         listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
+            listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             listen_socket.bind(('', config['tf2_listen_port']))
         except socket.error as e:
             print('Bind fail - ERRNO: {}, Message: {}'.format(e[0], e[1]))
