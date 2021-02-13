@@ -385,15 +385,18 @@ class MumbleBot:
         current_pug.set_ip(ec2_instance.get_ip())
         tf2_client = self.clients[pug_number]
 
-        # if we are reusing an active EC2 instance, just change PW
+        # if we are reusing an active EC2 instance, just update pug vars
         if ec2_instance.server_up:
             current_pug.rcon = tf2_client.rcon
+            current_pug.connect_pass = ec2_instance.get_tf2_pass()
+            self.set_pug(pug_number, current_pug)
             tf2_client.rcon_command("sv_password {}".format(current_pug.connect_pass))
         # otherwise, do first time setup
         else:
             time.sleep(2 * 60) 
             ec2_instance.run_command(self.ec2_interface.ssm_client, "echo 'test' > /tmp/hellothere")
             ec2_instance.run_command(self.ec2_interface.ssm_client, APPEND_TF2_CFG_DATA.format(current_pug.rcon, current_pug.connect_pass, path=config["tf2_config_path"]))
+            ec2_instance.set_tf2_pass(current_pug.connect_pass)
             ec2_instance.await_instance_startup()
             if tf2_client:
                 tf2_client.close()

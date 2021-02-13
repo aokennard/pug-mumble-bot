@@ -31,6 +31,12 @@ class EC2Instance:
 
     def get_ip(self):
         return self.ec2_credentials["ec2-ip"]
+
+    def get_tf2_pass(self):
+        return self.ec2_misc["tf2_pass"]
+
+    def set_tf2_pass(self, pw):
+        self.ec2_misc["tf2_pass"] = pw
         
     def run_command(self, client, command):
         try:
@@ -131,8 +137,12 @@ class EC2Interface:
         self.ec2_instance_pool.append(ec2_instance)
         # Work - naive for now, make better later TODO
         time.sleep(60)
+        
+        active_players = len(mumble_client.get_lobby_users(use_chill_room=False))
+        for pug in config["max_pugs"]:
+            active_players += mumble_client.get_pug_users(pug)
 
-        turn_off_instance = len(mumble_client.get_lobby_users(use_chill_room=False)) < config["min_total_players"]
+        turn_off_instance = active_players < config["min_total_players"]
 
         if turn_off_instance:
             print("Mumble monitor turning off instance")
