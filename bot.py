@@ -119,8 +119,11 @@ class MumbleBot:
     # TODO: reap zombies
     # TODO: command locking - start / end multiple pugs same time, etc
     # TODO: better style / helpers
-    # TODO: Test once AMI is changed to no longer ./tf2.sh on startup service + new plugin
     # TODO: statistics gathering on players, times for pugs / spin up etc
+    # TODO: update AMI to use screen + logging for tf2.sh
+    # TODO: server randomly died? 2nd pug, instance still alive.
+    # TODO: set info for a pug (ip etc)
+    # TODO: auth ticket issues w/ multiple servers??
     def __init__(self, server_ip, server_port, nickname, password):
         self.mumble_client = pymumble.Mumble(server_ip, nickname, password=password, port=server_port, debug=False)
         
@@ -240,7 +243,6 @@ class MumbleBot:
             mumble_users.append(user)
         return mumble_users
 
-    # TODO use git version of pymumble as it has channel linking
     def connect_lobby_with_pug(self, pug_number, link_channels=True):
         red_channel, blu_channel = self.pug_channels[pug_number][1:]
         if link_channels:
@@ -329,6 +331,14 @@ class MumbleBot:
                 return pug_number
         return -1
 
+    def get_pug_ips(self):
+        ips = []
+        for pug_number in range(1, config["max_pugs"] + 1):
+            pug = self.get_pug(pug_number)
+            if pug:
+                ips.append(pug.connect_ip)
+        return ips
+
     # Messaging / commands
     def send_user_message(self, receiver, message):
         if receiver != -1:
@@ -376,7 +386,7 @@ class MumbleBot:
         current_pug = self.get_pug(pug_number)
 
         print("Server startup thread on, creating / getting EC2 instance")
-        ec2_instance = self.ec2_interface.create_ec2_instance()
+        ec2_instance = self.ec2_interface.create_ec2_instance(active_ips=self.get_pug_ips())
         if ec2_instance == None:
             self.send_user_message(sender, "EC2 instance failed startup")
             return
@@ -613,6 +623,7 @@ class MumbleBot:
             time.sleep(5)
             print("Picking, current number of people in pug: ", pugger_count)
 
+        time.sleep(config["unlink_delay"])
         self.connect_lobby_with_pug(pug_number, link_channels=False)
         self.pug_bot_state = BotState.SENDING_INFO
         print("Done picking, sending info / waiting on server setup")

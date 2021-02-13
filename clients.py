@@ -83,8 +83,6 @@ class EC2Interface:
     def __init__(self, key_id="", access_key=""):
         self.ec2_client = self.setup_client('ec2', key_id, access_key)
         self.ssm_client = self.setup_client('ssm', key_id, access_key)
-        #self.instance_to_ip_id = dict()
-        self.ec2_instance_pool = []
 
     # no support for region priorities atm
     def setup_client(self, client_type, key_id, access_key):
@@ -100,9 +98,23 @@ class EC2Interface:
                 return EC2Instance(instance, ip)
         return None
 
-    def create_ec2_instance(self, init_script=None):
-        if len(self.ec2_instance_pool) != 0:
-            return self.ec2_instance_pool.pop()
+    def create_ec2_instance(self, active_ips=None):
+        describe_response = self.ec2_client.describe_instances(
+            Filters=[
+                {
+                    "Name" : "instance-type", 
+                    "Values" : config["instance_priorities"]
+                }
+            ]
+        )
+
+        described_instances = describe_response["Reservations"][0]["Instances"]
+        for instance in described_instances:
+            if "Tags" in instance and len(instance["Tags"]) != 0:
+                continue
+            if active_ips and instance["PublicIpAddress"] in active_ips:
+                continue
+            return EC2Instance(instance, instance["PublicIpAddress"])
 
         # alternatively, get existing instance and just turn it on.
         # no instance backup support atm
@@ -111,9 +123,9 @@ class EC2Interface:
                             MinCount=1,
                             SecurityGroupIds=config["ec2_secgroupids"],
                             ImageId=config["ec2_ami"],
-                            KeyName="pootis-proxy-key", 
+                            KeyName=config["ec2_key_name"], 
                             IamInstanceProfile={
-                                'Arn': 'arn:aws:iam::588801620431:instance-profile/AmazonSSMRoleForInstancesQuickSetup', 
+                                'Arn': config["iam_instance_profile"], 
                             }) 
         
         instance = conn.get("Instances")
@@ -134,21 +146,18 @@ class EC2Interface:
 
     # Monitor people currently in lobby or mumble as a whole, may not necessarily spin down
     def monitor_mumble_spin_down(self, ec2_instance, mumble_client):
-        self.ec2_instance_pool.append(ec2_instance)
         # Work - naive for now, make better later TODO
         time.sleep(60)
         
         active_players = len(mumble_client.get_lobby_users(use_chill_room=False))
         for pug in range(1, config["max_pugs"]):
-            active_players += mumble_client.get_pug_users(pug)
+            active_players += len(mumble_client.get_pug_users(pug))
 
         turn_off_instance = active_players < config["min_total_players"]
 
         if turn_off_instance:
             print("Mumble monitor turning off instance")
             self.turn_off_instance(ec2_instance)
-            if ec2_instance in self.ec2_instance_pool:
-                self.ec2_instance_pool.remove(ec2_instance)
         else:
             print("Mumble monitor is keeping instance alive")
             
